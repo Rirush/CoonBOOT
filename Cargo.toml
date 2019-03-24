@@ -1,0 +1,12 @@
+[package]
+name = "coonboot"
+version = "0.1.0"
+authors = ["rirush"]
+edition = "2018"
+
+[dependencies]
+uefi = { git = "https://github.com/rust-osdev/uefi-rs" }
+uefi-alloc = { git = "https://github.com/rust-osdev/uefi-rs" }
+uefi-logger = { git = "https://github.com/rust-osdev/uefi-rs" }
+uefi-services = { git = "https://github.com/rust-osdev/uefi-rs" }
+log = { version = "0.4", default-features = false }
