@@ -10,7 +10,7 @@ use core::ops::Try;
 use core::cell::UnsafeCell;
 use uefi::*;
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::proto::media::file::{File,FileMode,FileAttribute,FileHandle,FileInfo};
+use uefi::proto::media::file::{File,FileMode,FileAttribute,FileHandle,FileInfo,RegularFile};
 use uefi::prelude::*;
 use log::*;
 use alloc::vec::Vec;
@@ -50,6 +50,7 @@ pub extern "C" fn efi_main(_handle: Handle, system_table: SystemTable<Boot>) -> 
                         // As of now, assume that the kernel is located in /EFI/CoonOS/Kernel, later on it'll be moved onto partition with CoonOS installed
                         match file.handle().open("\\EFI\\CoonOS\\Kernel", FileMode::Read, FileAttribute::empty()) {
                             Ok(file) => {
+                                
                                 // We're almost done with loading kernel
                                 return process_kernel(file.log());
                             },
@@ -87,7 +88,7 @@ pub extern "C" fn efi_main(_handle: Handle, system_table: SystemTable<Boot>) -> 
 }
 
 // Since efi_main() gets too bloated, this function loads kernel to memory and gives control to it
-fn process_kernel(mut f: FileHandle) -> Status {
+unsafe fn process_kernel(mut f: FileHandle) -> Status {
     // Create buffer with length of zero, so we'll be able to get required size of the buffer for FileInfo struct
     let mut buffer: [u8; 0] = [0;0];
     // This always succeeds because 0 is always not enough for FileInfo to fit
@@ -101,8 +102,19 @@ fn process_kernel(mut f: FileHandle) -> Status {
                         let mut buffer: Vec<u8> = vec![0; size];
                         match f.get_info::<FileInfo>(&mut buffer) {
                             Ok(info) => {
-                                let size = info.log().file_size();
+                                let size = info.log().file_size() as usize;
                                 info!("Allocating {} bytes for kernel binary...", size);
+                                let mut file = RegularFile::new(f);
+                                let mut buffer: Vec<u8> = vec![0; size];
+                                match file.read(&mut buffer) {
+                                    Ok(_) => {
+                                        info!("Kernel executable has been loaded into memory");
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to read kernel executable. Error {:?}", e);
+                                        return Status::ABORTED;
+                                    }
+                                }
                             },
                             Err(e) => {
                                 error!("Failed to get information about file. Error {:?}", e);
