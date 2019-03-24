@@ -10,3 +10,4 @@ uefi-alloc = { git = "https://github.com/rust-osdev/uefi-rs" }
 uefi-logger = { git = "https://github.com/rust-osdev/uefi-rs" }
 uefi-services = { git = "https://github.com/rust-osdev/uefi-rs" }
 log = { version = "0.4", default-features = false }
+xmas-elf = { version = "0.6.2" }

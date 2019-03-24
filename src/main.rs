@@ -15,6 +15,7 @@ use uefi::prelude::*;
 use log::*;
 use alloc::vec::Vec;
 use alloc::vec;
+use xmas_elf::ElfFile;
 
 /// Bootloader entry point
 #[no_mangle]
@@ -87,7 +88,7 @@ pub extern "C" fn efi_main(_handle: Handle, system_table: SystemTable<Boot>) -> 
     return Status::SUCCESS;
 }
 
-// Since efi_main() gets too bloated, this function loads kernel to memory and gives control to it
+// Since efi_main() gets too bloated, this function loads kernel to memory and creates ElfFile out of it
 unsafe fn process_kernel(mut f: FileHandle) -> Status {
     // Create buffer with length of zero, so we'll be able to get required size of the buffer for FileInfo struct
     let mut buffer: [u8; 0] = [0;0];
@@ -109,6 +110,14 @@ unsafe fn process_kernel(mut f: FileHandle) -> Status {
                                 match file.read(&mut buffer) {
                                     Ok(_) => {
                                         info!("Kernel executable has been loaded into memory");
+                                        match ElfFile::new(&buffer) {
+                                            Ok(elf) => {
+                                                return load_kernel(elf);
+                                            },
+                                            Err(e) => {
+                                                error!("Failed to parse kernel executable. {}", e);
+                                            }
+                                        }
                                     },
                                     Err(e) => {
                                         error!("Failed to read kernel executable. Error {:?}", e);
@@ -136,5 +145,11 @@ unsafe fn process_kernel(mut f: FileHandle) -> Status {
             }
         }
     }
+    return Status::SUCCESS;
+}
+
+// Now process_kernel() got bloated too, so kernel loading is moved here
+fn load_kernel(elf: ElfFile) -> Status {
+
     return Status::SUCCESS;
 }
