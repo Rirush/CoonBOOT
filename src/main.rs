@@ -2,18 +2,23 @@
 #![no_main]
 
 #![feature(try_trait)]
+#![feature(alloc)]
+
+extern crate alloc;
 
 use core::ops::Try;
 use core::cell::UnsafeCell;
 use uefi::*;
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::proto::media::file::{File,FileMode,FileAttribute};
+use uefi::proto::media::file::{File,FileMode,FileAttribute,FileHandle,FileInfo};
 use uefi::prelude::*;
 use log::*;
+use alloc::vec::Vec;
+use alloc::vec;
 
 /// Bootloader entry point
 #[no_mangle]
-pub extern "C" fn efi_main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
+pub extern "C" fn efi_main(_handle: Handle, system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services first, so we'll have access to output and EFI file system
     if let Err(_) = uefi_services::init(&system_table) {
         // If we fail to initialize services (which should never happen at all), hand over control back to UEFI
@@ -45,7 +50,8 @@ pub extern "C" fn efi_main(handle: Handle, system_table: SystemTable<Boot>) -> S
                         // As of now, assume that the kernel is located in /EFI/CoonOS/Kernel, later on it'll be moved onto partition with CoonOS installed
                         match file.handle().open("\\EFI\\CoonOS\\Kernel", FileMode::Read, FileAttribute::empty()) {
                             Ok(file) => {
-                                
+                                // We're almost done with loading kernel
+                                return process_kernel(file.log());
                             },
                             Err(e) => {
                                 let s = Status::from_error(e);
@@ -77,5 +83,46 @@ pub extern "C" fn efi_main(handle: Handle, system_table: SystemTable<Boot>) -> S
     }
 
     // We must return from this function as of now. Later on the control will be handed to the kernel instead of back to UEFI
+    return Status::SUCCESS;
+}
+
+// Since efi_main() gets too bloated, this function loads kernel to memory and gives control to it
+fn process_kernel(mut f: FileHandle) -> Status {
+    // Create buffer with length of zero, so we'll be able to get required size of the buffer for FileInfo struct
+    let mut buffer: [u8; 0] = [0;0];
+    // This always succeeds because 0 is always not enough for FileInfo to fit
+    if let Err(e) = f.get_info::<FileInfo>(&mut buffer) {
+        let (s, size) = e.split();
+        match s {
+            Status::BUFFER_TOO_SMALL => {
+                match size {
+                    Some(size) => {
+                        info!("Allocating {} bytes for file information...", size);
+                        let mut buffer: Vec<u8> = vec![0; size];
+                        match f.get_info::<FileInfo>(&mut buffer) {
+                            Ok(info) => {
+                                let size = info.log().file_size();
+                                info!("Allocating {} bytes for kernel binary...", size);
+                            },
+                            Err(e) => {
+                                error!("Failed to get information about file. Error {:?}", e);
+                                return Status::ABORTED;
+                            }
+                        }
+                    },
+                    None => {
+                        // Not sure that this can happen, but this won't do any bad anyway
+                        error!("Can't allocate buffer for file information. Buffer size is unknown");
+                        return Status::ABORTED;
+                    }
+                }
+            },
+            _ => {
+                // Unexpected error occured, so we have to exit
+                error!("Failed to get information about file. Error {:?}", s);
+                return Status::ABORTED;
+            }
+        }
+    }
     return Status::SUCCESS;
 }
