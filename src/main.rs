@@ -19,8 +19,12 @@ use xmas_elf::ElfFile;
 pub extern "C" fn efi_main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
     let status = main(handle, system_table);
     match status {
-        Status::SUCCESS => {
-            Status::SUCCESS
+        Status::SUCCESS => 
+            Status::SUCCESS,
+        Status::NOT_FOUND => {
+            error!("Bootloader wasn't able to find kernel image.");
+            error!("Please make sure that your CoonOS installation is valid and that this bootloader version is compatible with the installed version of OS");
+            Status::ABORTED
         }
         _ => {
             error!(
