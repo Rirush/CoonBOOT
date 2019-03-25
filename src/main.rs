@@ -12,6 +12,9 @@ use uefi::prelude::*;
 use uefi::proto::media::file::{File, FileAttribute, FileHandle, FileInfo, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::*;
+use xmas_elf::program::ProgramHeader::Ph64;
+use xmas_elf::program::ProgramHeader64;
+use xmas_elf::program::Type::Load;
 use xmas_elf::ElfFile;
 
 /// Bootloader entry point
@@ -122,11 +125,36 @@ fn main(_handle: Handle, system_table: SystemTable<Boot>) -> Status {
     trace!("Loaded ELF into memory");
 
     // Construct ElfFile from loaded ELF
-    let _elf = ElfFile::new(&buffer).map_err(|e| {
+    let elf = ElfFile::new(&buffer).map_err(|e| {
         error!("Failed to parse ELF. {}", e);
         Status::ABORTED
     })?;
     trace!("Parsed ELF");
+
+    // Create vector for storing segments, that are required to load
+    let mut segments: Vec<ProgramHeader64> = vec![];
+
+    // Iterate over all segments in this ELF file and check which ones we need to load
+    for segment in elf.program_iter() {
+        if let Ph64(header) = segment {
+            if Load
+                == header.get_type().map_err(|e| {
+                    error!("Failed to get segment type. {}", e);
+                    Status::ABORTED
+                })?
+            {
+                segments.push(*header);
+            }
+        }
+    }
+    trace!("Retrieved list of segments to load");
+
+    // List all segments if we're running in debug mode
+    if cfg!(debug_assertions) {
+        for segment in segments {
+            trace!("Offset 0x{:x} -> VMem 0x{:x} : Size 0x{:x}", segment.offset, segment.virtual_addr, segment.mem_size);
+        }
+    }
 
     Status::SUCCESS
 }
