@@ -11,6 +11,8 @@ use log::*;
 use uefi::prelude::*;
 use uefi::proto::media::file::{File, FileAttribute, FileHandle, FileInfo, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
+use uefi::table::boot::MemoryDescriptor;
+use uefi::table::cfg;
 use uefi::*;
 use xmas_elf::program::ProgramHeader::Ph64;
 use xmas_elf::program::ProgramHeader64;
@@ -36,6 +38,13 @@ pub extern "C" fn efi_main(handle: Handle, system_table: SystemTable<Boot>) -> S
             Status::ABORTED
         }
     }
+}
+
+#[repr(C)]
+struct SystemDescription {
+    pub acpi2_address: usize,
+    pub smbios3_address: usize,
+    pub memory_map: Vec<MemoryDescriptor>,
 }
 
 fn get_info_size(file: &mut FileHandle) -> Option<usize> {
@@ -75,6 +84,50 @@ fn main(_handle: Handle, system_table: SystemTable<Boot>) -> Status {
     // Write pretty (kinda) message about which version of CoonBOOT the user is currently running
     info!("CoonBOOT v{}", env!("CARGO_PKG_VERSION"));
     trace!("Boot process start");
+
+    // Create SystemDescription structure. It will be passed to kernel later on
+    let mut system_description_table = SystemDescription {
+        acpi2_address: 0,
+        smbios3_address: 0,
+        memory_map: vec![],
+    };
+
+    // Read necessary values into SystemDescription structure
+    trace!("Reading configuration table");
+    for entry in system_table.config_table() {
+        match entry.guid {
+            cfg::ACPI2_GUID => system_description_table.acpi2_address = entry.address as usize,
+            cfg::SMBIOS_GUID => system_description_table.smbios3_address = entry.address as usize,
+            _ => {}
+        }
+    }
+    trace!("Configuration table read finished");
+
+    // If we failed to find ACPI and SMBIOS tables - abort boot process
+    if system_description_table.acpi2_address == 0 || system_description_table.smbios3_address == 0
+    {
+        error!("This system doesn't support ACPIv2 or SMBIOS. Unable to boot");
+        return Status::ABORTED;
+    }
+
+    // Save memory table in SystemDescription structure
+    trace!("Reading memory table");
+    let mmap_size = system_table.boot_services().memory_map_size();
+    let mut mmap_buffer: Vec<u8> = vec![0; mmap_size];
+    let (_key, iter) = system_table
+        .boot_services()
+        .memory_map(&mut mmap_buffer)?
+        .log();
+    for entry in iter {
+        trace!(
+            "{:?}: PMem 0x{:x} Pages {}",
+            entry.ty,
+            entry.phys_start,
+            entry.page_count
+        );
+        system_description_table.memory_map.push(*entry);
+    }
+    trace!("Memory table read finished");
 
     // Request SimpleFileSystem and open EFI volume's root
     let mut file = system_table
@@ -152,7 +205,12 @@ fn main(_handle: Handle, system_table: SystemTable<Boot>) -> Status {
     // List all segments if we're running in debug mode
     if cfg!(debug_assertions) {
         for segment in segments {
-            trace!("Offset 0x{:x} -> VMem 0x{:x} : Size 0x{:x}", segment.offset, segment.virtual_addr, segment.mem_size);
+            trace!(
+                "Offset 0x{:x} -> VMem 0x{:x} : Size 0x{:x}",
+                segment.offset,
+                segment.virtual_addr,
+                segment.mem_size
+            );
         }
     }
 
