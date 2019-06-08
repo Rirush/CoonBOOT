@@ -10,13 +10,14 @@ use log::*;
 use uefi::prelude::*;
 use uefi::proto::media::file::{File, FileAttribute, FileHandle, FileInfo, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::table::boot::MemoryDescriptor;
+use uefi::table::boot::{MemoryDescriptor,SearchType};
 use uefi::table::cfg;
 use uefi::*;
 use xmas_elf::program::ProgramHeader::Ph64;
 use xmas_elf::program::ProgramHeader64;
 use xmas_elf::program::Type::Load;
 use xmas_elf::ElfFile;
+use core::cell::UnsafeCell;
 
 /// Bootloader entry point
 #[no_mangle]
@@ -60,7 +61,32 @@ fn get_info_size(file: &mut FileHandle) -> Option<usize> {
     }
 }
 
-fn main(_handle: Handle, system_table: SystemTable<Boot>) -> Status {
+fn enumerate_drives<'a>(handle: &'a Handle, system_table: &'a SystemTable<Boot>) -> Option<Vec<&'a UnsafeCell<SimpleFileSystem>>> {
+    let result = system_table.boot_services().locate_handle(SearchType::from_proto::<SimpleFileSystem>(), None);
+    let size: usize;
+    match result {
+        Ok(v) => size = v.log(),
+        Err(_) => return None
+    };
+    let mut buf: Vec<Handle> = vec![*handle; size];
+    system_table.boot_services().locate_handle(SearchType::from_proto::<SimpleFileSystem>(), Some(&mut buf)).unwrap().log();
+    let mut filesystems: Vec<&'a UnsafeCell<SimpleFileSystem>> = vec![];
+    for h in buf {
+        match system_table.boot_services().handle_protocol::<SimpleFileSystem>(h) {
+            Ok(v) => {
+                filesystems.push(v.log())
+            },
+            Err(_) => {}
+        };
+    }
+    if filesystems.is_empty() {
+        None
+    } else {
+        Some(filesystems)
+    }
+}
+
+fn main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services first, so we'll have access to output and EFI file system
     if uefi_services::init(&system_table).is_err() {
         // If we fail to initialize services (which should never happen at all), hand over control back to UEFI
@@ -129,22 +155,66 @@ fn main(_handle: Handle, system_table: SystemTable<Boot>) -> Status {
     trace!("Memory table read finished");
 
     // Request SimpleFileSystem and open EFI volume's root
-    let mut file = system_table
-        .boot_services()
-        .locate_protocol::<SimpleFileSystem>()
-        .map(|fs| unsafe { (*fs.log().get()).open_volume() })??
-        .log();
-    trace!("Acquired EFI root handle");
+    // let mut file = system_table
+    //     .boot_services()
+    //     .locate_protocol::<SimpleFileSystem>()
+    //     .map(|fs| unsafe { (*fs.log().get()).open_volume() })??
+    //     .log();
+
+    // Enumerate over all available drives and search for Kernel
+    let mut file_handle: Option<FileHandle> = None;
+    // TODO: Make this code more linear
+    unsafe {
+        let result = enumerate_drives(&handle, &system_table);
+        match result {
+            Some(drives) => {
+                trace!("Found {} drives in the system", drives.len());
+                let mut counter = 0u8;
+                for drive in drives {
+                    match (*drive.get()).open_volume() {
+                        Ok(volume) => {
+                            trace!("Checking drive {}", counter);
+                            counter += 1;
+                            match volume.log().handle().open(
+                                "\\EFI\\CoonOS\\Kernel",
+                                FileMode::Read,
+                                FileAttribute::empty(),
+                            ) {
+                                Ok(file) => {
+                                    file_handle = Some(file.log());
+                                    break; 
+                                },
+                                Err(_) => {}
+                            }
+                        },
+                        Err(_) => {}
+                    };
+                }
+            },
+            None => return Status::NOT_FOUND
+        };
+    }
+    
+    // Unwrap our handle safely
+    let mut handle: FileHandle;
+    match file_handle {
+        Some(f) => {
+            handle = f;
+        },
+        None => {
+            return Status::NOT_FOUND;
+        }
+    };
 
     // As of now, assume that the kernel is located in /EFI/CoonOS/Kernel, later on it'll be moved onto partition with CoonOS installed
-    let mut handle = file
-        .handle()
-        .open(
-            "\\EFI\\CoonOS\\Kernel",
-            FileMode::Read,
-            FileAttribute::empty(),
-        )?
-        .log();
+    // let mut handle = file
+    //     .handle()
+    //     .open(
+    //         "\\EFI\\CoonOS\\Kernel",
+    //         FileMode::Read,
+    //         FileAttribute::empty(),
+    //     )?
+    //     .log();
     trace!("Opened kernel file successfully");
 
     // Get size for FileInfo buffer
