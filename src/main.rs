@@ -6,18 +6,20 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use alloc::boxed::Box;
+use core::cell::UnsafeCell;
 use log::*;
 use uefi::prelude::*;
+use uefi::proto::console::gop::*;
 use uefi::proto::media::file::{File, FileAttribute, FileHandle, FileInfo, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::table::boot::{MemoryDescriptor,SearchType};
+use uefi::table::boot::{MemoryDescriptor, SearchType};
 use uefi::table::cfg;
 use uefi::*;
 use xmas_elf::program::ProgramHeader::Ph64;
 use xmas_elf::program::ProgramHeader64;
 use xmas_elf::program::Type::Load;
 use xmas_elf::ElfFile;
-use core::cell::UnsafeCell;
 
 /// Bootloader entry point
 #[no_mangle]
@@ -41,10 +43,11 @@ pub extern "C" fn efi_main(handle: Handle, system_table: SystemTable<Boot>) -> S
 }
 
 #[repr(C)]
-struct SystemDescription {
+struct SystemDescription<'a> {
     pub acpi2_address: usize,
     pub smbios3_address: usize,
     pub memory_map: Vec<MemoryDescriptor>,
+    pub gop: *mut GraphicsOutput<'a>,
 }
 
 fn get_info_size(file: &mut FileHandle) -> Option<usize> {
@@ -61,21 +64,31 @@ fn get_info_size(file: &mut FileHandle) -> Option<usize> {
     }
 }
 
-fn enumerate_drives<'a>(handle: &'a Handle, system_table: &'a SystemTable<Boot>) -> Option<Vec<&'a UnsafeCell<SimpleFileSystem>>> {
-    let result = system_table.boot_services().locate_handle(SearchType::from_proto::<SimpleFileSystem>(), None);
+fn enumerate_drives<'a>(
+    handle: &'a Handle,
+    system_table: &'a SystemTable<Boot>,
+) -> Option<Vec<&'a UnsafeCell<SimpleFileSystem>>> {
+    let result = system_table
+        .boot_services()
+        .locate_handle(SearchType::from_proto::<SimpleFileSystem>(), None);
     let size: usize;
     match result {
         Ok(v) => size = v.log(),
-        Err(_) => return None
+        Err(_) => return None,
     };
     let mut buf: Vec<Handle> = vec![*handle; size];
-    system_table.boot_services().locate_handle(SearchType::from_proto::<SimpleFileSystem>(), Some(&mut buf)).unwrap().log();
+    system_table
+        .boot_services()
+        .locate_handle(SearchType::from_proto::<SimpleFileSystem>(), Some(&mut buf))
+        .unwrap()
+        .log();
     let mut filesystems: Vec<&'a UnsafeCell<SimpleFileSystem>> = vec![];
     for h in buf {
-        match system_table.boot_services().handle_protocol::<SimpleFileSystem>(h) {
-            Ok(v) => {
-                filesystems.push(v.log())
-            },
+        match system_table
+            .boot_services()
+            .handle_protocol::<SimpleFileSystem>(h)
+        {
+            Ok(v) => filesystems.push(v.log()),
             Err(_) => {}
         };
     }
@@ -86,7 +99,7 @@ fn enumerate_drives<'a>(handle: &'a Handle, system_table: &'a SystemTable<Boot>)
     }
 }
 
-fn main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
+fn main(image_handle: Handle, system_table: SystemTable<Boot>) -> Status {
     // Initialize UEFI services first, so we'll have access to output and EFI file system
     if uefi_services::init(&system_table).is_err() {
         // If we fail to initialize services (which should never happen at all), hand over control back to UEFI
@@ -115,6 +128,7 @@ fn main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
         acpi2_address: 0,
         smbios3_address: 0,
         memory_map: vec![],
+        gop: core::ptr::null_mut(),
     };
 
     // Read necessary values into SystemDescription structure
@@ -136,23 +150,29 @@ fn main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
     }
 
     // Save memory table in SystemDescription structure
-    trace!("Reading memory table");
-    let mmap_size = system_table.boot_services().memory_map_size();
-    let mut mmap_buffer: Vec<u8> = vec![0; mmap_size];
-    let (_key, iter) = system_table
+    // trace!("Reading memory table");
+    // let mmap_size = system_table.boot_services().memory_map_size();
+    // let mut mmap_buffer: Vec<u8> = vec![0; mmap_size];
+    // let (_key, iter) = system_table
+    //     .boot_services()
+    //     .memory_map(&mut mmap_buffer)?
+    //     .log();
+    // for entry in iter {
+    //     trace!(
+    //         "{:?}: PMem 0x{:x} Pages {}",
+    //         entry.ty,
+    //         entry.phys_start,
+    //         entry.page_count
+    //     );
+    //     system_description_table.memory_map.push(*entry);
+    // }
+    // trace!("Memory table read finished");
+
+    let gop = system_table
         .boot_services()
-        .memory_map(&mut mmap_buffer)?
+        .locate_protocol::<GraphicsOutput>()?
         .log();
-    for entry in iter {
-        trace!(
-            "{:?}: PMem 0x{:x} Pages {}",
-            entry.ty,
-            entry.phys_start,
-            entry.page_count
-        );
-        system_description_table.memory_map.push(*entry);
-    }
-    trace!("Memory table read finished");
+    system_description_table.gop = gop.get();
 
     // Request SimpleFileSystem and open EFI volume's root
     // let mut file = system_table
@@ -165,7 +185,7 @@ fn main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
     let mut file_handle: Option<FileHandle> = None;
     // TODO: Make this code more linear
     unsafe {
-        let result = enumerate_drives(&handle, &system_table);
+        let result = enumerate_drives(&image_handle, &system_table);
         match result {
             Some(drives) => {
                 trace!("Found {} drives in the system", drives.len());
@@ -182,25 +202,25 @@ fn main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
                             ) {
                                 Ok(file) => {
                                     file_handle = Some(file.log());
-                                    break; 
-                                },
+                                    break;
+                                }
                                 Err(_) => {}
                             }
-                        },
+                        }
                         Err(_) => {}
                     };
                 }
-            },
-            None => return Status::NOT_FOUND
+            }
+            None => return Status::NOT_FOUND,
         };
     }
-    
+
     // Unwrap our handle safely
     let mut handle: FileHandle;
     match file_handle {
         Some(f) => {
             handle = f;
-        },
+        }
         None => {
             return Status::NOT_FOUND;
         }
@@ -283,5 +303,21 @@ fn main(handle: Handle, system_table: SystemTable<Boot>) -> Status {
         }
     }
 
-    Status::SUCCESS
+    let mmap_size = system_table.boot_services().memory_map_size();
+    let mut mmap_buffer: Box<[u8]> = vec![0; mmap_size].into_boxed_slice();
+    system_description_table.memory_map.resize_with(mmap_size / core::mem::size_of::<MemoryDescriptor>(), Default::default);
+
+    // From here on we cannot rely on UEFI and need to make sure that everything is ready
+    // TODO: Uncomment this when everything is actually ready
+    let (_system_table, iter) = system_table.exit_boot_services(image_handle, &mut mmap_buffer[..]).unwrap().unwrap();
+
+    {
+        let mut c = 0;
+        for entry in iter {
+            system_description_table.memory_map[c] = *entry;
+            c += 1;
+        }
+    }
+
+    loop {}
 }
